@@ -54,6 +54,31 @@ def base_url() -> str:
     return (os.environ.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").rstrip("/")
 
 
+def default_model() -> str:
+    """OLLAMA_DEFAULT_MODEL: the local model a chat lands on when it is switched to the local
+    backend, or when it names a model the box does not serve.
+
+    Without it the landing model is whatever `/api/tags` lists first, and ollama lists the
+    MOST RECENTLY PULLED model first — so pulling a small test model silently changed which
+    model every newly switched chat ran on. With MAX_LOADED_MODELS=1 that also evicts the
+    model the box's other clients keep warm. Unset, or naming a model the box does not
+    serve, keeps the endpoint's own order.
+    """
+    return (os.environ.get("OLLAMA_DEFAULT_MODEL", "") or "").strip()
+
+
+def _put_default_first(models: list[dict]) -> list[dict]:
+    """Every consumer that needs ONE model takes `models[0]` (the server's substitution in
+    webapp, the chat's fallback) or `m.default` (the picker) — so the default goes first
+    AND carries the flag; the rest keep the endpoint's order."""
+    want = default_model()
+    if not want or not any(m["value"] == want for m in models):
+        return models
+    ordered = sorted(models, key=lambda m: m["value"] != want)  # stable
+    ordered[0] = {**ordered[0], "default": True}
+    return ordered
+
+
 def auth_token() -> str:
     """Ollama ignores it, but the CLI refuses to start without SOME credential."""
     return (_rs.get("OLLAMA_AUTH_TOKEN", "") or "local").strip() or "local"
@@ -87,11 +112,11 @@ async def backend_info(*, force: bool = False) -> dict:
     url = base_url()
     try:
         raw = await asyncio.to_thread(_fetch_tags, url)
-        models = [
+        models = _put_default_first([
             {"value": name, "label": name}
             for name in (str(m.get("name") or "").strip() for m in raw)
             if name
-        ]
+        ])
         info = {
             "backend": BACKEND, "enabled": True, "available": bool(models), "models": models,
             "base_url": url,

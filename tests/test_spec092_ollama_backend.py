@@ -147,6 +147,34 @@ async def test_probe_result_is_cached(monkeypatch):
     assert calls["n"] == 1, "a second call inside the TTL must not re-probe the box"
 
 
+@pytest.mark.asyncio
+async def test_the_configured_default_model_is_listed_first_and_flagged(monkeypatch):
+    """ollama lists the most recently pulled model first; without OLLAMA_DEFAULT_MODEL a
+    freshly pulled test model became the model every switched chat landed on."""
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_DEFAULT_MODEL", "qwen3.8:27b-q4_K_M")
+    monkeypatch.setattr(ob, "_fetch_tags", lambda url: [
+        {"name": "gemma4:12b-it-q4_K_M"}, {"name": "hip-qwen3-4b:latest"},
+        {"name": "qwen3.8:27b-q4_K_M"}])
+    info = await ob.backend_info(force=True)
+    assert [m["value"] for m in info["models"]] == [
+        "qwen3.8:27b-q4_K_M", "gemma4:12b-it-q4_K_M", "hip-qwen3-4b:latest"]
+    assert info["models"][0].get("default") is True
+    assert not any(m.get("default") for m in info["models"][1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", ["", "not-served:latest"])
+async def test_an_unset_or_unserved_default_keeps_the_endpoint_order(monkeypatch, configured):
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_DEFAULT_MODEL", configured)
+    monkeypatch.setattr(ob, "_fetch_tags", lambda url: [
+        {"name": "gemma4:12b-it-q4_K_M"}, {"name": "qwen3.8:27b-q4_K_M"}])
+    info = await ob.backend_info(force=True)
+    assert [m["value"] for m in info["models"]] == ["gemma4:12b-it-q4_K_M", "qwen3.8:27b-q4_K_M"]
+    assert not any(m.get("default") for m in info["models"])
+
+
 # ───────────────────────── 3. backend-specific model validation ───────────────
 
 
