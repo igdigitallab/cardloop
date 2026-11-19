@@ -11,7 +11,7 @@
 venv/bin/python tools/gen_route_index.py
 ```
 
-200 routes on 172 paths (195 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
+201 routes on 173 paths (196 need the session cookie, 5 do not). Methods and paths are exact; the description is the first line of the handler's docstring, or the matching [API.md](API.md) row when the handler has no docstring (a dash means neither has one). Request and response shapes for the main flows are in [API.md](API.md); for the rest, the handler named in the table is the reference.
 
 ## Authentication
 
@@ -179,6 +179,7 @@ Routes marked `feature: <name>` belong to an optional feature package under `fea
 | `GET` | `/api/projects/{id}/session-context` | cookie | `api_project_session_context` | Current session context summary (Feature A — context read) |
 | `GET` | `/api/projects/{id}/session-history` | cookie | `api_project_session_history` | Feed for active (or specified) session. |
 | `GET` | `/api/projects/{id}/sessions` | cookie | `api_project_sessions` | List of SDK sessions for the project. |
+| `POST` | `/api/projects/{id}/sessions/{provider}/{session_id}/delete` | cookie | `api_session_delete` | — |
 | `POST` | `/api/projects/{id}/sessions/{sid}/label` | cookie | `api_project_session_label` | {label} |
 | `GET` | `/api/projects/{id}/settings` | cookie | `api_project_settings_get` | Per-project settings. |
 | `POST` | `/api/projects/{id}/settings` | cookie | `api_project_settings_post` | Partial update of per-project settings in topics.json. |
