@@ -347,3 +347,17 @@ To inspect the profile by hand: `secret get cloak-manager-token`, then
   (`_ForgetState.transcript_cut`, `purge_search` dropping the transcript's `file_state`,
   `purge_usage_cut` setting `lines` back): a file that regrows past its old size before the next
   sweep would otherwise be read from the stale offset.
+  The usage scanner can be MID-PARSE when the cut lands: its cursor write is a compare-and-set
+  against the row it read (`usage_scanner._set_cursor`), and a file shorter than its cursor is
+  re-read from line 0 (2026-11-19).
+- **A process check matches the PROGRAM, never an argument.** Both writer checks refused a live
+  delete because of the deleting agent's own command line: Claude's because the session id sat in
+  a shell's script text, Codex's because `python3 check.py codex` passed the word `codex` as an
+  argument (`_claude_runs_session`, `_codex_processes` look at argv[0] or the script an interpreter
+  runs). A new provider's `busy_reason` must follow the same rule.
+- **Residue windows must not come from text the cockpit injected.** The first prompt of every
+  session carries the context pack (board, memory routes) and often system reminders; windows
+  taken from them hit every timeline, audit log and other provider session of the cockpit (live
+  2026-11-19: 21 false places for a one-turn Codex session, 32 for Grok, 0 real). `collect_held`
+  strips `forget._NOISE_TAGS` from prompts before sampling; the prompt's own digests still use the
+  full text. `<task-notification>` stays: it is the session's own sub-agent output.

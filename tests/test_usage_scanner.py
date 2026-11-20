@@ -185,6 +185,60 @@ def test_scan_and_incremental(tmp_path):
     conn.close()
 
 
+def test_a_file_that_shrank_under_the_cursor_is_reread(tmp_path):
+    """A forget cut truncates a transcript in place; a cursor past the new end must not hide
+    the turns written after the cut."""
+    import sqlite3
+    proj = tmp_path / "projects" / "demo"
+    proj.mkdir(parents=True)
+    db = tmp_path / "usage.db"
+    f = proj / "s.jsonl"
+    _write_jsonl(f, [_assistant("S1", f"m{i}", out=10) for i in range(5)])
+    usage_scanner.scan(projects_dir=tmp_path / "projects", db_path=db)
+    time.sleep(0.02)
+    _write_jsonl(f, [_assistant("S1", "m0", out=10), _assistant("S1", "m1", out=10),
+                     _assistant("S1", "after-cut", out=7)])
+    usage_scanner.scan(projects_dir=tmp_path / "projects", db_path=db)
+    conn = sqlite3.connect(db)
+    try:
+        ids = {r[0] for r in conn.execute("SELECT message_id FROM turns")}
+        assert "after-cut" in ids
+        assert conn.execute("SELECT lines FROM processed_files").fetchone()[0] == 3
+    finally:
+        conn.close()
+
+
+def test_a_cursor_moved_during_the_scan_wins(tmp_path, monkeypatch):
+    """The forget cut's cursor rewind lands while the scan parses the file: the scan's own
+    (pre-cut) line count must not overwrite it."""
+    import sqlite3
+    proj = tmp_path / "projects" / "demo"
+    proj.mkdir(parents=True)
+    db = tmp_path / "usage.db"
+    f = proj / "s.jsonl"
+    _write_jsonl(f, [_assistant("S1", "m1", out=10)])
+    usage_scanner.scan(projects_dir=tmp_path / "projects", db_path=db)
+    time.sleep(0.02)
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(_assistant("S1", "m2", out=10) + "\n" + _assistant("S1", "m3", out=10) + "\n")
+    real = usage_scanner.parse_jsonl_file
+
+    def parse_then_cut(path, start=0):
+        out = real(path, start)
+        c = sqlite3.connect(db)
+        c.execute("UPDATE processed_files SET lines = 1, mtime = 0 WHERE path = ?", (str(path),))
+        c.commit()
+        c.close()
+        return out
+    monkeypatch.setattr(usage_scanner, "parse_jsonl_file", parse_then_cut)
+    usage_scanner.scan(projects_dir=tmp_path / "projects", db_path=db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT lines, mtime FROM processed_files").fetchone() == (1, 0)
+    finally:
+        conn.close()
+
+
 def test_dashboard_data_shape_and_cost(tmp_path):
     proj = tmp_path / "projects" / "demo"
     proj.mkdir(parents=True)

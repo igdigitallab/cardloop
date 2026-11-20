@@ -409,6 +409,20 @@ def insert_turns(conn: sqlite3.Connection, turns: list[dict]) -> None:
     ])
 
 
+def _set_cursor(conn: sqlite3.Connection, filepath: str, row, mtime: float, lines) -> None:
+    """Compare-and-set the file's cursor against the row this scan READ. A forget cut moves the
+    cursor back while a scan may be parsing the same file (forget.purge_usage_cut, mtime = 0);
+    a blind write would put the pre-cut line count back and hide the next turns behind it."""
+    if row is None:
+        conn.execute("INSERT OR IGNORE INTO processed_files (path, mtime, lines) VALUES (?, ?, ?)",
+                     (filepath, mtime, lines))
+    else:
+        conn.execute("UPDATE processed_files SET mtime = ?, lines = ? "
+                     "WHERE path = ? AND mtime IS ? AND lines IS ?",
+                     (mtime, lines, filepath, row["mtime"], row["lines"]))
+    conn.commit()
+
+
 def scan(projects_dir: Path | str | None = None,
          db_path: Path | str = DEFAULT_DB_PATH, verbose: bool = False) -> dict:
     """Incrementally scan transcripts into the DB. Fast to re-run (mtime-gated)."""
@@ -436,11 +450,17 @@ def scan(projects_dir: Path | str | None = None,
         is_new = row is None
         start_line = 0 if is_new else (row["lines"] or 0)
         session_metas, turns, agents, line_count = parse_jsonl_file(filepath, start_line)
+        if not is_new and line_count < start_line:
+            # The file shrank under the cursor (a forget cut truncates a transcript in place):
+            # the cursor counts lines that no longer exist, so the next turns would hide behind
+            # it. Re-read from 0 - turns are INSERT OR IGNORE by message id and the session
+            # totals are recomputed from the turns below.
+            start_line = 0
+            session_metas, turns, agents, line_count = parse_jsonl_file(filepath, 0)
 
         if line_count <= start_line and not is_new:
             # mtime moved but no new content.
-            conn.execute("UPDATE processed_files SET mtime = ? WHERE path = ?", (mtime, filepath))
-            conn.commit()
+            _set_cursor(conn, filepath, row, mtime, row["lines"])
             skipped_files += 1
             continue
 
@@ -456,9 +476,7 @@ def scan(projects_dir: Path | str | None = None,
         else:
             updated_files += 1
 
-        conn.execute("INSERT OR REPLACE INTO processed_files (path, mtime, lines) VALUES (?, ?, ?)",
-                     (filepath, mtime, line_count))
-        conn.commit()
+        _set_cursor(conn, filepath, row, mtime, line_count)
 
     # Recompute session totals from actual turns (INSERT OR IGNORE may have dropped
     # duplicate message-ids that upsert_sessions had already added additively).

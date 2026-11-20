@@ -212,8 +212,11 @@ def _codex_processes() -> "list[tuple[int, str]]":
         exe = os.path.basename(argv[0])
         hit = exe == "codex" or exe.startswith("codex-")
         if not hit and exe.startswith(_INTERPRETERS):
-            hit = any(os.path.basename(a) in ("codex", "codex.js", "codex.mjs") or os.path.basename(a).startswith("codex-")
-                      for a in argv[1:3])
+            # Only the SCRIPT the interpreter runs (its first non-option argument) counts: a plain
+            # argument named `codex` (`python3 check.py codex`) refused a live delete.
+            script = next((a for a in argv[1:4] if not a.startswith("-")), "")
+            b = os.path.basename(script)
+            hit = b in ("codex", "codex.js", "codex.mjs") or b.startswith("codex-")
         if hit:
             found.append((pid, " ".join(argv)[:120]))
     return found
@@ -480,7 +483,7 @@ class CodexAdapter:
         cwd = str((project or {}).get("cwd") or "")
         if row:
             cwd = row[0] or cwd
-            title = (row[1] or row[2] or "")[:120]
+            title = forget.session_title(row[1], row[2])
             first, last = _iso(row[3]), _iso(row[4])
         return SessionArtifacts(
             provider="codex", session_id=session_id, cwd=cwd, title=title, paths=paths,

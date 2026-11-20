@@ -286,6 +286,16 @@ def test_node_wrapper_counts_as_codex(home, tmp_path):
     assert "in use" in CodexAdapter().busy_reason({}, {}, T)
 
 
+def test_an_argument_named_codex_is_not_a_codex_process(home, tmp_path):
+    """Live 19.11: `python3 check.py codex` refused a delete as "Codex is in use"."""
+    p = tmp_path / "proc" / "9"
+    p.mkdir()
+    (p / "cmdline").write_bytes(b"python3\0forget_live_a.py\0codex\0")
+    assert CodexAdapter().busy_reason({}, {}, T) is None
+    (p / "cmdline").write_bytes(b"node\0--max-old-space-size=4096\0/opt/codex/bin/codex.js\0exec\0")
+    assert "in use" in CodexAdapter().busy_reason({}, {}, T)
+
+
 def test_locked_database_is_a_leftover_not_a_failure(home, monkeypatch):
     monkeypatch.setattr(forget_codex, "_native_delete", _fake_native(home))
     ad = CodexAdapter()

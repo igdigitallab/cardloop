@@ -242,6 +242,36 @@ _RAW_RUN = re.compile(r'[^"\\\x00-\x1f\x7f]{24,}')
 _MEDIA_RE = re.compile(r"chat-media/([A-Za-z0-9_.@-]+)/([A-Za-z0-9_.@%+=,()-]+\.[A-Za-z0-9]{1,8})")
 
 
+# Blocks the cockpit or the SDK prefixes onto a prompt whose text is NOT this session's own: the
+# context pack (board, memory routes) and system reminders repeat in every chat of the project,
+# a prior-session summary belongs to the previous session. A residue window taken from them hits
+# every timeline and audit log of the cockpit (measured live: 21 false places for a one-turn
+# Codex session). <task-notification> is deliberately absent: it carries this session's own
+# sub-agent output.
+_NOISE_TAGS = ("context-pack", "system-reminder", "prior-session-summary")
+_NOISE_BLOCK_RE = re.compile(r"<(?P<tag>" + "|".join(_NOISE_TAGS) + r")\b[^>]*>.*?</(?P=tag)\s*>",
+                             re.DOTALL | re.IGNORECASE)
+_NOISE_OPEN_RE = re.compile(r"\A\s*<(?:" + "|".join(_NOISE_TAGS) + r")\b", re.IGNORECASE)
+
+
+def strip_noise_blocks(text: str) -> str:
+    """`text` without the cockpit-injected blocks above. A block left open at the very start (a
+    title cut at 120 chars inside the pack) leaves nothing: what follows is not known to be the
+    operator's."""
+    out = _NOISE_BLOCK_RE.sub("", text or "")
+    return "" if _NOISE_OPEN_RE.match(out) else out.strip()
+
+
+def session_title(*candidates: "str | None") -> str:
+    """The first candidate that still says something once the injected blocks are gone, cut to
+    120 chars (strip BEFORE cutting: the pack alone is longer than the cut)."""
+    for c in candidates:
+        t = strip_noise_blocks(str(c or ""))
+        if t:
+            return t[:120]
+    return ""
+
+
 def _window_candidates(text: str) -> "list[str]":
     """ASCII-safe windows (no JSON-escape ambiguity); a raw UTF-8 window for non-ASCII text."""
     out: list = []
@@ -293,6 +323,8 @@ def collect_held(items: "Iterator[ContentItem]", *, seed: str,
                 if key not in se_seen and len(held.side_effects) < MAX_SIDE_EFFECTS:
                     se_seen.add(key)
                     held.side_effects.append(se)
+        if it.kind == "prompt":
+            text = strip_noise_blocks(text)
         if it.kind in ("prompt", "assistant", "tool_result", "summary") and len(text) >= 40:
             for w in _window_candidates(text):
                 cands[w] = hashlib.sha1((seed + w).encode("utf-8", "replace")).digest()
@@ -1136,7 +1168,9 @@ def default_residue_roots(data_dir: Path, home: "Path | None" = None) -> "list[P
 
 
 def _classify_hit(path: str, data_dir: Path, home: Path) -> str:
-    if path.startswith(str(data_dir)):
+    # A separator, not a bare prefix: GROK_HOME sits NEXT TO the data dir (`<data>-grok-home`),
+    # and "/x/data-grok-home/..".startswith("/x/data") labelled Grok's own files "cockpit data".
+    if path == str(data_dir) or path.startswith(str(data_dir).rstrip("/") + "/"):
         return "cockpit data"
     for frag, label in ((".claude/projects", "claude transcripts"), (".claude-accounts", "claude account"),
                         (".claude/", "claude home"), (".codex", "codex home"),

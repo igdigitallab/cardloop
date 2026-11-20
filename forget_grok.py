@@ -328,11 +328,11 @@ class GrokAdapter:
         title, first, last = "", None, None
         if dirs:
             summary = grok_history._read_json(dirs[0] / "summary.json") or {}
-            title = str(summary.get("title") or summary.get("session_summary") or "")[:120]
+            title = forget.session_title(summary.get("title"), summary.get("session_summary"))
             first = grok_history._iso_to_epoch(summary.get("created_at"))
             last = grok_history._iso_to_epoch(summary.get("updated_at"))
         if not title and row:
-            title = (row[1] or "")[:120]
+            title = forget.session_title(row[1])
         if last is None and row and isinstance(row[2], (int, float)):
             last = float(row[2])
         groups = sorted({str(d.parent.name) for d in dirs})

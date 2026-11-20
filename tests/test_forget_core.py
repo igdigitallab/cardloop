@@ -434,6 +434,31 @@ def test_non_ascii_text_gets_a_raw_utf8_window():
     assert held.windows and not held.windows[0].isascii()
 
 
+def test_context_pack_and_reminders_never_become_residue_windows():
+    """Live 19.11: windows taken from the context pack hit every timeline of the cockpit."""
+    pack = "<context-pack>\n" + "Board card Ship the onboarding wizard for every new operator account. " * 3 + "\n</context-pack>"
+    note = "<system-reminder>Reminder text that the SDK adds to many prompts in every chat.</system-reminder>"
+    own = "Remember the code word ZQOWNSENTINEL and reply with the stored value please."
+    held = forget.collect_held(iter([forget.ContentItem("prompt", pack + "\n\n" + note + "\n" + own, 1.0, uuid="u")]),
+                               seed="s")
+    assert held.windows and all(w in own for w in held.windows)
+    assert held.prompts                       # the prompt's own keys still come from the full text
+
+
+def test_grok_home_next_to_the_data_dir_is_not_cockpit_data(tmp_path):
+    data = tmp_path / "data"
+    assert forget._classify_hit(str(tmp_path / "data-grok-home" / "sessions" / "x.jsonl"), data, tmp_path) == "grok home"
+    assert forget._classify_hit(str(data / "timeline" / "p.jsonl"), data, tmp_path) == "cockpit data"
+
+
+def test_session_title_skips_the_injected_pack():
+    pack = "<context-pack>\n" + "x" * 400 + "\n</context-pack>"
+    assert forget.session_title(pack + "\n\nfix the login bug") == "fix the login bug"
+    assert forget.session_title(pack[:120], pack + "\nsecond") == "second"     # a pack cut at 120 says nothing
+    assert forget.session_title(None, "") == ""
+    assert forget.session_title("y" * 300) == "y" * 120
+
+
 def test_window_cap_and_determinism():
     items = [forget.ContentItem("assistant", "lorem ipsum dolor sit " + f"{i:05d}" + " amet consectetur adipiscing elit")
              for i in range(2000)]
