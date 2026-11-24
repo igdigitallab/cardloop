@@ -1,6 +1,7 @@
 import { useState, FormEvent, useRef, useEffect } from 'react'
 import { api } from '../api'
 import { t } from '../i18n'
+import { loginErrorKey } from '../lib/loginError'
 import { canChangeServer, requestServerChange } from '../native/handoff'
 
 interface Props {
@@ -50,15 +51,11 @@ export function LoginScreen({ onLogin }: Props) {
         // Switch into 2FA step — keep password in state
         setTotpMode(true)
         setTotpCode('')
-      } else if (apiErr.status === 401 && apiErr.body?.error === 'totp_invalid') {
-        // Stay in 2FA step, show inline error
-        setError(t['login.error_totp_invalid'])
-        setTotpCode('')
-      } else if (apiErr.status === 503 && apiErr.body?.error === '2fa_state_unreadable') {
-        // The server refused to guess: the 2FA state could not be read (fail closed)
-        setError(t['login.error_2fa_unreadable'])
       } else {
-        setError(t['login.error_wrong_password'])
+        const key = loginErrorKey(err)
+        setError(t[key])
+        // A wrong 2FA code keeps the 2FA step, with the code field cleared
+        if (key === 'login.error_totp_invalid') setTotpCode('')
       }
     } finally {
       setLoading(false)

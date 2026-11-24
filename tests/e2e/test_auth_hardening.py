@@ -82,3 +82,24 @@ def test_a_cockpit_without_a_configured_salt_persists_a_private_one(e2e_server):
     assert len(f.read_text().strip()) >= 32
     log = (e2e_server["app_dir"] / "server.log").read_text(errors="replace")
     assert f.read_text().strip() not in log          # never printed
+
+
+def test_an_unreachable_server_is_not_reported_as_a_wrong_passphrase(e2e_server, page):
+    """2026-11-21: a laptop whose Tailscale key expired still got the login screen (the service
+    worker serves the cached shell offline), and every attempt with the RIGHT passphrase said
+    "Wrong passphrase" because any failure mapped to that text. A request that never reached the
+    server must say so; only a real 401 may blame the passphrase."""
+    page.goto(e2e_server["base_url"])
+    page.route("**/api/login", lambda route: route.abort("internetdisconnected"))
+    page.fill("#password", e2e_server["password"])
+    page.click("button.btn-primary[type=submit]")
+    msg = page.locator(".error-msg")
+    msg.wait_for(timeout=10_000)
+    assert "Cannot reach the cockpit server" in msg.inner_text()
+    assert "Wrong passphrase" not in msg.inner_text()
+
+    page.unroute("**/api/login")
+    page.fill("#password", "definitely-not-the-passphrase")
+    page.click("button.btn-primary[type=submit]")
+    page.wait_for_function(
+        "() => document.querySelector('.error-msg')?.innerText === 'Wrong passphrase'", timeout=10_000)
