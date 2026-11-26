@@ -7,6 +7,13 @@ Versions follow semver-like conventions (0.x while the project is under active d
 
 ## [Unreleased]
 
+### Changed — Agent SDK 0.2.189
+- `claude-agent-sdk` floor 0.2.180 → 0.2.189: the bundled CLI goes from 2.1.321 to 2.1.332 (the current
+  npm `latest`). No model moves: all four aliases (fable, sonnet, opus, haiku) resolve to the same ids on
+  both bundles, probed before the bump. SDK-side changes the cockpit touches: the CLI version check now
+  reads the init message instead of spawning `cli -v`, and `can_use_tool` permission updates are sent
+  all-or-nothing; the bundled CLI is still preferred over PATH, and `DEFERRING_TASK_TYPES` is unchanged.
+
 ### Changed — Fable 5.2
 - `claude-agent-sdk` floor 0.2.180: its bundled CLI 2.1.321 resolves the `fable` alias to
   `claude-fable-5-2` (released 2026-11-09). On 0.2.176 the alias still ran Fable 5.1 while
